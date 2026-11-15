@@ -422,24 +422,28 @@ class T04StaticExport(unittest.TestCase):
             return f.read()
 
     def assertClosed(self, rel, body):
-        for path in re.findall(r"href='(/(?:person|movie|tv|genre|keyword)/\d+)'", body):
+        for path in re.findall(r"href='(/(?:person|movie|tv|genre|keyword)/[0-9][A-Za-z0-9-]*)'", body):
             f = os.path.join(self.build, path.lstrip("/"), "index.html")
             self.assertTrue(os.path.exists(f), "dead internal link %s in %s" % (path, rel))
 
     def test_export_produces_a_clean_static_site(self):
-        stats = app.export_site(self.build)
+        stats = app.export_site(self.build, base_url="https://schlock.test")
         self.assertGreater(stats["pages"], 3)
 
+        # pages live at slugged, human-readable paths (not bare ids)
         self.assertTrue(os.path.exists(os.path.join(self.build, "index.html")))
-        self.assertTrue(os.path.exists(os.path.join(self.build, "person", "51572", "index.html")))
-        self.assertTrue(os.path.exists(os.path.join(self.build, "movie", "515721", "index.html")))
+        self.assertTrue(os.path.exists(
+            os.path.join(self.build, "person", "51572-aaron-norris", "index.html")))
+        self.assertTrue(os.path.exists(
+            os.path.join(self.build, "movie", "515721-fake-movie-515721", "index.html")))
+        self.assertFalse(os.path.exists(os.path.join(self.build, "person", "51572", "index.html")))
 
         home = self.read("index.html")
-        person = self.read("person", "51572", "index.html")
-        movie = self.read("movie", "515721", "index.html")
+        person = self.read("person", "51572-aaron-norris", "index.html")
+        movie = self.read("movie", "515721-fake-movie-515721", "index.html")
 
         self.assertIn("Aaron Norris", home)
-        self.assertIn("href='/person/51572'", home)
+        self.assertIn("href='/person/51572-aaron-norris'", home)
 
         # no interactive chrome survives the export
         for name, doc in (("home", home), ("person", person), ("movie", movie)):
@@ -450,14 +454,23 @@ class T04StaticExport(unittest.TestCase):
         self.assertNotIn("?view=", person)
         self.assertNotIn("?discover=", movie)
 
-        # fetched director stays linked; an un-imported stub cast member is de-linked
-        self.assertIn("href='/person/51572'", movie)
-        self.assertNotIn("href='/person/516721'", movie)
+        # fetched director stays linked (slugged); an un-imported stub cast member is de-linked
+        self.assertIn("href='/person/51572-aaron-norris'", movie)
+        self.assertNotIn("href='/person/516721", movie)
+
+        # SEO: per-page description + canonical, plus sitemap and robots
+        for doc in (home, person, movie):
+            self.assertIn("<meta name='description'", doc)
+            self.assertIn("<link rel='canonical' href='https://schlock.test/", doc)
+        sitemap = self.read("sitemap.xml")
+        self.assertIn("https://schlock.test/person/51572-aaron-norris/", sitemap)
+        robots = self.read("robots.txt")
+        self.assertIn("Sitemap: https://schlock.test/sitemap.xml", robots)
 
         # every internal link that remains points at a page we actually wrote
         self.assertClosed("index.html", home)
-        self.assertClosed("person/51572/index.html", person)
-        self.assertClosed("movie/515721/index.html", movie)
+        self.assertClosed("person/51572-aaron-norris/index.html", person)
+        self.assertClosed("movie/515721-fake-movie-515721/index.html", movie)
 
 
 if __name__ == "__main__":

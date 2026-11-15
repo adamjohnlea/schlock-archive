@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -681,6 +682,18 @@ def e(s):
     return html.escape("" if s is None else str(s), quote=True)
 
 
+def slugify(text, maxlen=60):
+    """A URL-safe, ASCII slug: 'Chopping Mall!' -> 'chopping-mall'. Empty for name-less items."""
+    text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:maxlen].strip("-")
+
+
+def clip(text, n=160):
+    """One-line, collapsed, truncated text for meta descriptions."""
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    return (text[:n].rstrip() + "…") if len(text) > n else text
+
+
 def img_url(path, size="w185"):
     return (IMG + size + path) if path else None
 
@@ -807,9 +820,20 @@ FAVICON = ("data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewB
            "<text y=%22.9em%22 font-size=%2290%22>📼</text></svg>")
 
 
-def page(title, body, warning=None, status=200, flash_kind="warn", head_extra=""):
+def page(title, body, warning=None, status=200, flash_kind="warn", head_extra="", description=None, image=None):
     flash = ('<div class="flash %s">%s</div>' % (flash_kind, e(warning))) if warning else ""
     fake = ' <span class="badge tv">FAKE DATA MODE</span>' if CONFIG["fake"] else ""
+    meta = ""
+    if description:
+        d = e(clip(description))
+        meta = ("<meta name='description' content='%s'>"
+                "<meta property='og:type' content='website'>"
+                "<meta property='og:site_name' content='Schlock Archive'>"
+                "<meta property='og:title' content='%s'><meta property='og:description' content='%s'>"
+                % (d, e(title), d))
+        if image:
+            meta += "<meta property='og:image' content='%s'>" % e(image)
+    head_extra = meta + head_extra
     if CONFIG.get("static"):
         nav = "<nav><a href='/'>Directors</a></nav>"
         search = ""
@@ -929,7 +953,9 @@ def render_home(conn, flash=None):
                      % (r["tmdb_id"], e(r["name"]), badge, tmdb_ext("person", r["tmdb_id"]),
                         e(r["example_films"]), e(r["notes"])))
         o.append("</div>")
-    return page("Directors", "".join(o), flash, flash_kind="ok")
+    return page("Directors", "".join(o), flash, flash_kind="ok",
+                description="A browsable archive of %d schlock and b-movie directors and their films, "
+                            "drawn from TMDB." % len(rows))
 
 
 def render_person(conn, pid, view=None, force=False):
@@ -1044,7 +1070,10 @@ def render_person(conn, pid, view=None, force=False):
                                            title_link(r["media_type"], r["title_id"]), e(r["title"] or "Untitled"),
                                            badges, e(", ".join(g["roles"])), tmdb_ext(r["media_type"], r["title_id"])))
         o.append("</table>")
-    return page(name, "".join(o), warning, head_extra=head_extra)
+    return page(name, "".join(o), warning, head_extra=head_extra,
+                description=(clip(row["biography"]) or
+                             "%s: filmography and credits in the Schlock Archive." % name),
+                image=img_url(row["profile_path"], "w342"))
 
 
 def render_title(conn, media_type, tid, force=False, flash=None):
@@ -1180,7 +1209,10 @@ def render_title(conn, media_type, tid, force=False, flash=None):
     for rt, lab in (("recommendations", "TMDB recommends"), ("similar", "Similar titles")):
         if rel[rt]:
             o.append("<h2>%s</h2><div class='tiles'>%s</div>" % (lab, "".join(title_tile(r) for r in rel[rt])))
-    return page(t, "".join(o), warning or flash, flash_kind="warn" if warning else "ok")
+    return page(t, "".join(o), warning or flash, flash_kind="warn" if warning else "ok",
+                description=(clip(row["overview"]) or row["tagline"] or
+                            ("%s%s" % (t, (" (%s)" % year_of(row["release_date"])) if row["release_date"] else ""))),
+                image=img_url(row["poster_path"], "w342"))
 
 def render_search(conn, qstr):
     qstr = (qstr or "").strip()
@@ -1308,7 +1340,8 @@ def render_tag(conn, kind, tag_id, discover=False):
                      "poster_path": r.get("poster_path")}) for r in res if r.get("id")))
             except TMDBError as err:
                 o.append("<div class='flash err'>TMDB discover failed: %s</div>" % e(err.message))
-    return page(label, "".join(o))
+    return page(label, "".join(o),
+                description="%d films in the Schlock Archive tagged %s %s." % (len(rows), kind, label))
 
 
 def render_setup(conn, error=None, ok=None):
@@ -1616,21 +1649,56 @@ def render_route(conn, url):
     raise ValueError("no static route for %s" % url)
 
 
-def neutralize_dead_links(html_text, existing):
-    """Keep internal links whose target was exported (stripping any ?query); de-link the rest.
+def build_slug_url(conn):
+    """Return slug_url(path): '/person/98132' -> '/person/98132-jim-wynorski' for readable, SEO URLs."""
+    people = {r["id"]: slugify(r["name"]) for r in conn.execute("SELECT id, name FROM people")}
+    titles = {(r["media_type"], r["id"]): slugify(r["title"])
+              for r in conn.execute("SELECT media_type, id, title FROM movies")}
+    genres = {r["id"]: slugify(r["name"]) for r in conn.execute("SELECT id, name FROM genres")}
+    keywords = {r["id"]: slugify(r["name"]) for r in conn.execute("SELECT id, name FROM keywords")}
+
+    def slug_url(path):
+        m = re.match(r"^/(person|movie|tv|genre|keyword)/(\d+)$", path)
+        if not m:
+            return path
+        kind, i = m.group(1), int(m.group(2))
+        s = (people.get(i) if kind == "person" else
+             titles.get((kind, i)) if kind in ("movie", "tv") else
+             genres.get(i) if kind == "genre" else keywords.get(i))
+        return "%s-%s" % (path, s) if s else path
+    return slug_url
+
+
+def rewrite_links(html_text, existing, slug_url):
+    """Slug internal links whose target was exported (dropping any ?query); de-link the rest.
 
     A de-linked anchor keeps its text but loses its href, so the published site has no broken
     internal links (e.g. cast members whose pages were never imported)."""
     def repl(m):
         q, path = m.group("q"), m.group("path")
         if path in existing:
-            return "href=%s%s%s" % (q, path, q)
+            return "href=%s%s%s" % (q, slug_url(path), q)
         return "data-unlinked=%s%s%s" % (q, path, q)
     return _INTERNAL_HREF.sub(repl, html_text)
 
 
-def export_site(out_dir, limit=None):
-    """Write a static HTML copy of the current archive to out_dir. Returns stats."""
+def _write_sitemap(out_dir, base_url, locs):
+    base = base_url.rstrip("/")
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    lines += ["<url><loc>%s</loc></url>" % e(base + loc) for loc in locs]
+    lines.append("</urlset>")
+    with open(os.path.join(out_dir, "sitemap.xml"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    with open(os.path.join(out_dir, "robots.txt"), "w", encoding="utf-8") as fh:
+        fh.write("User-agent: *\nAllow: /\nSitemap: %s/sitemap.xml\n" % base)
+
+
+def export_site(out_dir, limit=None, base_url=None):
+    """Write a static HTML copy of the current archive to out_dir. Returns stats.
+
+    base_url (e.g. 'https://schlock.example') enables canonical links, og:url, sitemap.xml and
+    robots.txt; without it the build is still complete but has no absolute-URL metadata."""
     out_dir = os.path.abspath(out_dir)
     quiet = CONFIG.get("quiet")
     prev = CONFIG.get("static", False)
@@ -1643,29 +1711,43 @@ def export_site(out_dir, limit=None):
             rest = [u for u in urls if not u.startswith("/person/") and u != "/"]
             urls = ["/"] + people + rest
         existing = set(urls)
+        slug_url = build_slug_url(conn)
+        slugged = {u: slug_url(u) for u in urls}    # bare route -> slugged route
+        locs = []                                   # slugged, trailing-slashed paths for the sitemap
         pages = errors = 0
         for url in urls:
             try:
-                body = neutralize_dead_links(render_route(conn, url), existing)
+                body = rewrite_links(render_route(conn, url), existing, slug_url)
             except Exception as err:  # one bad record must not abort the whole build
                 errors += 1
                 if not quiet:
                     print("  skip %s (%s: %s)" % (url, type(err).__name__, err))
                 continue
-            dest = os.path.join(out_dir, _url_to_path(url))
+            loc = "/" if url == "/" else slugged[url] + "/"
+            if base_url:
+                canon = e(base_url.rstrip("/") + loc)
+                body = body.replace(
+                    "</head>",
+                    "<link rel='canonical' href='%s'><meta property='og:url' content='%s'></head>" % (canon, canon),
+                    1)
+            dest = os.path.join(out_dir, _url_to_path(slugged[url]))
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(body)
+            locs.append(loc)
             pages += 1
             if not quiet and pages % 250 == 0:
                 print("  ...%d pages" % pages, flush=True)
+        if base_url:
+            _write_sitemap(out_dir, base_url, locs)
     finally:
         conn.close()
         CONFIG["static"] = prev
     if not quiet:
-        print("  Exported %d pages to %s%s"
-              % (pages, out_dir, (" (%d skipped)" % errors) if errors else ""))
-    return {"pages": pages, "errors": errors, "out_dir": out_dir}
+        extra = (" (%d skipped)" % errors) if errors else ""
+        extra += "  + sitemap.xml, robots.txt" if base_url else ""
+        print("  Exported %d pages to %s%s" % (pages, out_dir, extra))
+    return {"pages": pages, "errors": errors, "out_dir": out_dir, "base_url": base_url}
 
 
 class Server(ThreadingHTTPServer):
@@ -1694,13 +1776,16 @@ def main(argv=None):
                     help="write a static HTML copy of the current archive to DIR and exit (no server, no TMDB)")
     ap.add_argument("--limit", type=int, default=None,
                     help="with --export, cap how many person pages to write (for quick test builds)")
+    ap.add_argument("--base-url", default=None,
+                    help="with --export, the public site URL (e.g. https://schlock.example); enables "
+                         "canonical links, sitemap.xml and robots.txt")
     a = ap.parse_args(argv)
     CONFIG["fake"] = a.fake
     CONFIG["db"] = os.path.abspath(a.db) if a.db else (os.path.join(APP_DIR, "schlock-fake.db") if a.fake else DEFAULT_DB)
     init_db()
     if a.export:
         print("\n  Exporting static site from %s" % CONFIG["db"], flush=True)
-        stats = export_site(a.export, limit=a.limit)
+        stats = export_site(a.export, limit=a.limit, base_url=a.base_url)
         print("  Done: %d pages written.\n" % stats["pages"])
         return
     srv, port = make_server(a.port)

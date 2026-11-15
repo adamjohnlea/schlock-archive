@@ -834,10 +834,11 @@ def page(title, body, warning=None, status=200, flash_kind="warn", head_extra=""
         if image:
             meta += "<meta property='og:image' content='%s'>" % e(image)
     head_extra = meta + head_extra
+    bp = CONFIG.get("base_path") or ""  # subpath prefix for a project-page deploy; "" at root / in the live app
     if CONFIG.get("static"):
-        nav = "<nav><a href='/'>Directors</a><a href='/search/'>Search</a></nav>"
-        search = ("<form class='search' action='/search/' method='get'><input type='search' name='q' "
-                  "placeholder='Search directors &amp; films…'><button>Go</button></form>")
+        nav = "<nav><a href='%s/'>Directors</a><a href='%s/search/'>Search</a></nav>" % (bp, bp)
+        search = ("<form class='search' action='%s/search/' method='get'><input type='search' name='q' "
+                  "placeholder='Search directors &amp; films…'><button>Go</button></form>" % bp)
         footer_note = ("A static archive of schlock directors and their films, built from "
                        "<a href='https://www.themoviedb.org/' target='_blank' rel='noopener'>TMDB</a> data. "
                        "This product uses the TMDB API but is not endorsed or certified by TMDB.")
@@ -852,10 +853,10 @@ def page(title, body, warning=None, status=200, flash_kind="warn", head_extra=""
     doc = ("<!doctype html><html lang='en'><head><meta charset='utf-8'>%s"
            "<meta name='viewport' content='width=device-width,initial-scale=1'><title>%s · Schlock Archive</title>"
            "<link rel='icon' href='%s'><style>%s</style></head><body>"
-           "<header class='top'><div class='bar'><a class='brand' href='/'>Schlock<span>Archive</span></a>%s"
+           "<header class='top'><div class='bar'><a class='brand' href='%s/'>Schlock<span>Archive</span></a>%s"
            "%s%s</div></header>"
            "<main>%s%s</main><footer>%s</footer></body></html>"
-           % (head_extra, e(title), FAVICON, CSS, fake, nav, search, flash, body, footer_note))
+           % (head_extra, e(title), FAVICON, CSS, bp, fake, nav, search, flash, body, footer_note))
     return status, doc
 
 
@@ -1677,15 +1678,16 @@ def build_slug_url(conn):
     return slug_url
 
 
-def rewrite_links(html_text, existing, slug_url):
+def rewrite_links(html_text, existing, slug_url, base_path=""):
     """Slug internal links whose target was exported (dropping any ?query); de-link the rest.
 
-    A de-linked anchor keeps its text but loses its href, so the published site has no broken
+    Kept links are prefixed with base_path so the site works under a project-page subpath. A
+    de-linked anchor keeps its text but loses its href, so the published site has no broken
     internal links (e.g. cast members whose pages were never imported)."""
     def repl(m):
         q, path = m.group("q"), m.group("path")
         if path in existing:
-            return "href=%s%s%s" % (q, slug_url(path), q)
+            return "href=%s%s%s%s" % (q, base_path, slug_url(path), q)
         return "data-unlinked=%s%s%s" % (q, path, q)
     return _INTERNAL_HREF.sub(repl, html_text)
 
@@ -1766,13 +1768,13 @@ SEARCH_JS = r"""
       if(p===0)starts.push(it);else if(p>0)has.push(it);}
     var hits=starts.concat(has),shown=hits.slice(0,300);
     count.textContent=hits.length+' result'+(hits.length===1?'':'s')+(hits.length>300?' (showing 300)':'');
-    out.innerHTML=shown.map(function(it){return "<a class='srow' href='"+encodeURI(it.u)+"'>"+
+    out.innerHTML=shown.map(function(it){return "<a class='srow' href='"+SA_BASE+encodeURI(it.u)+"'>"+
       "<span class='st'>"+esc(it.t)+"</span><span class='sk'>"+esc(it.k)+"</span>"+
       "<span class='ss'>"+esc(it.s)+"</span></a>";}).join('');
   }
   input.addEventListener('input',function(){var q=input.value;
     try{history.replaceState(null,'','?q='+encodeURIComponent(q));}catch(e){}render(q);});
-  fetch('/search-index.json').then(function(r){return r.json();}).then(function(j){
+  fetch(SA_BASE+'/search-index.json').then(function(r){return r.json();}).then(function(j){
     data=j;var q=getq();input.value=q;render(q);input.focus();
   }).catch(function(){count.textContent='Could not load the search index.';});
 })();
@@ -1786,13 +1788,14 @@ SEARCH_CSS = (".srow{display:grid;grid-template-columns:1fr auto auto;gap:14px;a
               "#q{width:100%;padding:12px 14px;font-size:1.05em;box-sizing:border-box;margin:6px 0 4px}")
 
 
-def render_static_search(conn):
+def render_static_search(conn, base_path=""):
     """The static search page: an input plus inline JS that filters /search-index.json in the browser."""
     body = ("<h1>Search the archive</h1>"
             "<input id='q' type='search' autofocus autocomplete='off' "
             "placeholder='Search directors, films, genres, keywords…'>"
             "<p id='count' class='muted small'></p><div id='results'></div>"
-            "<style>%s</style><script>%s</script>" % (SEARCH_CSS, SEARCH_JS))
+            "<style>%s</style><script>var SA_BASE=%s;%s</script>"
+            % (SEARCH_CSS, json.dumps(base_path), SEARCH_JS))
     return page("Search", body,
                 description="Search the Schlock Archive of directors, films, genres and keywords.")[1]
 
@@ -1818,8 +1821,10 @@ def export_site(out_dir, limit=None, base_url=None, images=False):
     serve them locally (slower; needs network)."""
     out_dir = os.path.abspath(out_dir)
     quiet = CONFIG.get("quiet")
-    prev = CONFIG.get("static", False)
+    base_path = urllib.parse.urlparse(base_url).path.rstrip("/") if base_url else ""
+    prev, prev_bp = CONFIG.get("static", False), CONFIG.get("base_path")
     CONFIG["static"] = True
+    CONFIG["base_path"] = base_path
     conn = db()
     img_cache = {}
     try:
@@ -1835,7 +1840,7 @@ def export_site(out_dir, limit=None, base_url=None, images=False):
         pages = errors = 0
         for url in urls:
             try:
-                body = rewrite_links(render_route(conn, url), existing, slug_url)
+                body = rewrite_links(render_route(conn, url), existing, slug_url, base_path)
                 if images:
                     body = localize_images(body, out_dir, img_cache, base_url)
             except Exception as err:  # one bad record must not abort the whole build
@@ -1862,7 +1867,7 @@ def export_site(out_dir, limit=None, base_url=None, images=False):
         # client-side search: a JSON index and a search page that filters it in the browser
         with open(os.path.join(out_dir, "search-index.json"), "w", encoding="utf-8") as fh:
             json.dump(build_search_index(conn, slug_url), fh, ensure_ascii=False, separators=(",", ":"))
-        sbody = render_static_search(conn)
+        sbody = render_static_search(conn, base_path)
         if base_url:
             canon = e(base_url.rstrip("/") + "/search/")
             sbody = sbody.replace(
@@ -1875,11 +1880,19 @@ def export_site(out_dir, limit=None, base_url=None, images=False):
         locs.append("/search/")
         pages += 1
 
+        # GitHub Pages helpers: disable Jekyll, and a styled 404 page
+        open(os.path.join(out_dir, ".nojekyll"), "w").close()
+        with open(os.path.join(out_dir, "404.html"), "w", encoding="utf-8") as fh:
+            fh.write(page("Not found",
+                          "<h1>404 &mdash; this tape is missing</h1>"
+                          "<p><a href='%s/'>Back to the shelves</a></p>" % base_path)[1])
+
         if base_url:
             _write_sitemap(out_dir, base_url, locs)
     finally:
         conn.close()
         CONFIG["static"] = prev
+        CONFIG["base_path"] = prev_bp
     n_images = len([v for v in img_cache.values() if v])
     if not quiet:
         extra = (" (%d skipped)" % errors) if errors else ""

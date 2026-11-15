@@ -482,6 +482,35 @@ class T04StaticExport(unittest.TestCase):
         self.assertClosed("person/51572-aaron-norris/index.html", person)
         self.assertClosed("movie/515721-fake-movie-515721/index.html", movie)
 
+    def test_export_under_a_subpath(self):
+        build2 = os.path.join(self.tmp, "sub")
+        app.export_site(build2, base_url="https://u.github.io/schlock-archive")
+
+        def read2(*p):
+            with open(os.path.join(build2, *p), encoding="utf-8") as f:
+                return f.read()
+
+        home = read2("index.html")
+        # content, nav, brand and the search form all carry the subpath prefix
+        self.assertIn("href='/schlock-archive/person/51572-aaron-norris'", home)
+        self.assertIn("action='/schlock-archive/search/'", home)
+        self.assertIn("href='/schlock-archive/'", home)
+        # canonical uses the full base URL (including the subpath)
+        self.assertIn("<link rel='canonical' href='https://u.github.io/schlock-archive/", home)
+        # the search page knows the base for its fetch; the index itself stays root-relative
+        search_page = read2("search", "index.html")
+        self.assertIn('SA_BASE="/schlock-archive"', search_page)
+        idx = json.loads(read2("search-index.json"))
+        self.assertTrue(any(it["u"] == "/person/51572-aaron-norris/" for it in idx))
+        # GitHub Pages helpers
+        self.assertTrue(os.path.exists(os.path.join(build2, ".nojekyll")))
+        self.assertTrue(os.path.exists(os.path.join(build2, "404.html")))
+
+        # links still resolve to real files when the subpath prefix is stripped
+        for path in re.findall(r"href='/schlock-archive(/(?:person|movie|tv|genre|keyword)/[0-9][A-Za-z0-9-]*)'", home):
+            self.assertTrue(os.path.exists(os.path.join(build2, path.lstrip("/"), "index.html")),
+                            "dead subpath link %s" % path)
+
 
 class T05ImageLocalize(unittest.TestCase):
     """Downloading TMDB images into the build and rewriting the HTML to point at them."""

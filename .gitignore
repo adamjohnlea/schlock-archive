@@ -1,0 +1,31 @@
+# Local archive database (personal state, mutates constantly, 7MB+ binary).
+# Back this up separately — it holds all your imports, notes, and TMDB key.
+schlock.db
+schlock.db-journal
+schlock.db-wal
+schlock.db-shm
+
+# Fake/demo database
+schlock-fake.db
+schlock-fake.db-*
+
+# Static site build output (generated from the DB)
+/build/
+/dist/
+/site/
+
+# Coverage / profiling
+*.profraw
+default.profraw
+.coverage
+htmlcov/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store

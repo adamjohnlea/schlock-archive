@@ -835,8 +835,9 @@ def page(title, body, warning=None, status=200, flash_kind="warn", head_extra=""
             meta += "<meta property='og:image' content='%s'>" % e(image)
     head_extra = meta + head_extra
     if CONFIG.get("static"):
-        nav = "<nav><a href='/'>Directors</a></nav>"
-        search = ""
+        nav = "<nav><a href='/'>Directors</a><a href='/search/'>Search</a></nav>"
+        search = ("<form class='search' action='/search/' method='get'><input type='search' name='q' "
+                  "placeholder='Search directors &amp; films…'><button>Go</button></form>")
         footer_note = ("A static archive of schlock directors and their films, built from "
                        "<a href='https://www.themoviedb.org/' target='_blank' rel='noopener'>TMDB</a> data. "
                        "This product uses the TMDB API but is not endorsed or certified by TMDB.")
@@ -930,11 +931,18 @@ def render_home(conn, flash=None):
                       " (SELECT COUNT(*) FROM movies WHERE fetched_at IS NOT NULL) m,"
                       " (SELECT COUNT(*) FROM user_data WHERE status='want') w,"
                       " (SELECT COUNT(*) FROM user_data WHERE status='watched') d").fetchone()
-    o = ["<h1>Directors of Ill Repute</h1>",
-         "<p class='muted'>%d directors to start from. Click anyone to pull their full TMDB record into your local "
-         "archive. Every name and film on every page links onward, so the archive grows as you browse.</p>" % len(rows),
-         "<div class='stats'><div><b>%d</b>people imported</div><div><b>%d</b>films imported</div>"
-         "<div><b>%d</b>want to watch</div><div><b>%d</b>watched</div></div>" % (st["p"], st["m"], st["w"], st["d"])]
+    if CONFIG.get("static"):
+        intro = ("%d directors in the archive. Click any name to dive into their films; every film, cast member, "
+                 "and keyword links onward." % len(rows))
+        stats = ("<div class='stats'><div><b>%d</b>people</div><div><b>%d</b>films &amp; shows</div></div>"
+                 % (st["p"], st["m"]))
+    else:
+        intro = ("%d directors to start from. Click anyone to pull their full TMDB record into your local archive. "
+                 "Every name and film on every page links onward, so the archive grows as you browse." % len(rows))
+        stats = ("<div class='stats'><div><b>%d</b>people imported</div><div><b>%d</b>films imported</div>"
+                 "<div><b>%d</b>want to watch</div><div><b>%d</b>watched</div></div>"
+                 % (st["p"], st["m"], st["w"], st["d"]))
+    o = ["<h1>Directors of Ill Repute</h1>", "<p class='muted'>%s</p>" % intro, stats]
     if not has_key(conn) and not CONFIG.get("static"):
         o.append("<div class='flash warn'>No TMDB key yet. <a href='/setup'>Set one up</a> to start importing.</div>")
     keys = sorted(cats.keys())
@@ -1721,6 +1729,74 @@ def localize_images(html_text, out_dir, cache, base_url=None, fetch=None):
     return html_text
 
 
+def build_search_index(conn, slug_url):
+    """A compact list of searchable entries (slugged url, title, subtitle, kind) for client-side search."""
+    items = []
+    for r in conn.execute("SELECT id, name, known_for_department FROM people WHERE fetched_at IS NOT NULL"):
+        items.append({"u": slug_url("/person/%d" % r["id"]) + "/", "t": r["name"] or "Unknown",
+                      "s": r["known_for_department"] or "Person", "k": "person"})
+    for r in conn.execute("SELECT media_type, id, title, release_date FROM movies WHERE fetched_at IS NOT NULL"):
+        yr = year_of(r["release_date"])
+        items.append({"u": slug_url("/%s/%d" % (r["media_type"], r["id"])) + "/", "t": r["title"] or "Untitled",
+                      "s": ("TV" if r["media_type"] == "tv" else "Film") + (" · %s" % yr if yr else ""),
+                      "k": r["media_type"]})
+    for r in conn.execute(
+            "SELECT DISTINCT g.genre_id id, gn.name FROM movie_genres g JOIN genres gn ON gn.id=g.genre_id "
+            "JOIN movies m ON m.media_type=g.media_type AND m.id=g.movie_id WHERE m.fetched_at IS NOT NULL"):
+        items.append({"u": slug_url("/genre/%d" % r["id"]) + "/", "t": r["name"], "s": "Genre", "k": "genre"})
+    for r in conn.execute(
+            "SELECT DISTINCT k.keyword_id id, kw.name FROM movie_keywords k JOIN keywords kw ON kw.id=k.keyword_id "
+            "JOIN movies m ON m.media_type=k.media_type AND m.id=k.movie_id WHERE m.fetched_at IS NOT NULL"):
+        items.append({"u": slug_url("/keyword/%d" % r["id"]) + "/", "t": r["name"], "s": "Keyword", "k": "keyword"})
+    return items
+
+
+SEARCH_JS = r"""
+(function(){
+  var input=document.getElementById('q'),out=document.getElementById('results'),
+      count=document.getElementById('count'),data=null;
+  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+  function getq(){try{return new URLSearchParams(location.search).get('q')||'';}catch(e){return '';}}
+  function render(q){
+    q=(q||'').trim().toLowerCase();
+    if(!data){count.textContent='Loading the index…';return;}
+    if(!q){out.innerHTML='';count.textContent=data.length+' entries. Start typing.';return;}
+    var starts=[],has=[];
+    for(var i=0;i<data.length;i++){var it=data[i],t=(it.t||'').toLowerCase(),p=t.indexOf(q);
+      if(p===0)starts.push(it);else if(p>0)has.push(it);}
+    var hits=starts.concat(has),shown=hits.slice(0,300);
+    count.textContent=hits.length+' result'+(hits.length===1?'':'s')+(hits.length>300?' (showing 300)':'');
+    out.innerHTML=shown.map(function(it){return "<a class='srow' href='"+encodeURI(it.u)+"'>"+
+      "<span class='st'>"+esc(it.t)+"</span><span class='sk'>"+esc(it.k)+"</span>"+
+      "<span class='ss'>"+esc(it.s)+"</span></a>";}).join('');
+  }
+  input.addEventListener('input',function(){var q=input.value;
+    try{history.replaceState(null,'','?q='+encodeURIComponent(q));}catch(e){}render(q);});
+  fetch('/search-index.json').then(function(r){return r.json();}).then(function(j){
+    data=j;var q=getq();input.value=q;render(q);input.focus();
+  }).catch(function(){count.textContent='Could not load the search index.';});
+})();
+"""
+
+SEARCH_CSS = (".srow{display:grid;grid-template-columns:1fr auto auto;gap:14px;align-items:baseline;"
+              "padding:10px 4px;border-bottom:1px solid #2a2a2a;text-decoration:none;color:inherit}"
+              ".srow:hover{background:rgba(255,255,255,.05)}.srow .st{font-weight:600}"
+              ".srow .sk{font-size:.72em;text-transform:uppercase;letter-spacing:.05em;color:#e0a24a}"
+              ".srow .ss{color:#8a8a8a;font-size:.85em;text-align:right}"
+              "#q{width:100%;padding:12px 14px;font-size:1.05em;box-sizing:border-box;margin:6px 0 4px}")
+
+
+def render_static_search(conn):
+    """The static search page: an input plus inline JS that filters /search-index.json in the browser."""
+    body = ("<h1>Search the archive</h1>"
+            "<input id='q' type='search' autofocus autocomplete='off' "
+            "placeholder='Search directors, films, genres, keywords…'>"
+            "<p id='count' class='muted small'></p><div id='results'></div>"
+            "<style>%s</style><script>%s</script>" % (SEARCH_CSS, SEARCH_JS))
+    return page("Search", body,
+                description="Search the Schlock Archive of directors, films, genres and keywords.")[1]
+
+
 def _write_sitemap(out_dir, base_url, locs):
     base = base_url.rstrip("/")
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -1782,6 +1858,23 @@ def export_site(out_dir, limit=None, base_url=None, images=False):
             pages += 1
             if not quiet and pages % 250 == 0:
                 print("  ...%d pages" % pages, flush=True)
+
+        # client-side search: a JSON index and a search page that filters it in the browser
+        with open(os.path.join(out_dir, "search-index.json"), "w", encoding="utf-8") as fh:
+            json.dump(build_search_index(conn, slug_url), fh, ensure_ascii=False, separators=(",", ":"))
+        sbody = render_static_search(conn)
+        if base_url:
+            canon = e(base_url.rstrip("/") + "/search/")
+            sbody = sbody.replace(
+                "</head>",
+                "<link rel='canonical' href='%s'><meta property='og:url' content='%s'></head>" % (canon, canon), 1)
+        sdest = os.path.join(out_dir, "search", "index.html")
+        os.makedirs(os.path.dirname(sdest), exist_ok=True)
+        with open(sdest, "w", encoding="utf-8") as fh:
+            fh.write(sbody)
+        locs.append("/search/")
+        pages += 1
+
         if base_url:
             _write_sitemap(out_dir, base_url, locs)
     finally:

@@ -445,9 +445,8 @@ class T04StaticExport(unittest.TestCase):
         self.assertIn("Aaron Norris", home)
         self.assertIn("href='/person/51572-aaron-norris'", home)
 
-        # no interactive chrome survives the export
+        # no interactive (POST) chrome survives the export; a GET search form is fine
         for name, doc in (("home", home), ("person", person), ("movie", movie)):
-            self.assertNotIn("<form", doc, "form leaked into %s" % name)
             self.assertNotIn("method='post'", doc, "post leaked into %s" % name)
             self.assertNotIn("Refresh from TMDB", doc)
         self.assertNotIn("Import directed films", person)
@@ -464,8 +463,19 @@ class T04StaticExport(unittest.TestCase):
             self.assertIn("<link rel='canonical' href='https://schlock.test/", doc)
         sitemap = self.read("sitemap.xml")
         self.assertIn("https://schlock.test/person/51572-aaron-norris/", sitemap)
+        self.assertIn("https://schlock.test/search/", sitemap)
         robots = self.read("robots.txt")
         self.assertIn("Sitemap: https://schlock.test/sitemap.xml", robots)
+
+        # client-side search: a JSON index + a search page, and the header box points at it
+        index = json.loads(self.read("search-index.json"))
+        self.assertTrue(any(it["t"] == "Aaron Norris" and it["u"] == "/person/51572-aaron-norris/" for it in index),
+                        "person missing from search index")
+        self.assertTrue(any(it["k"] in ("movie", "tv") for it in index), "no titles in search index")
+        search_page = self.read("search", "index.html")
+        self.assertIn("/search-index.json", search_page)
+        self.assertIn("id='q'", search_page)
+        self.assertIn("action='/search/'", home)
 
         # every internal link that remains points at a page we actually wrote
         self.assertClosed("index.html", home)

@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ---- configure (or override with env vars) -------------------------------
-BASE_URL="${BASE_URL:-https://USERNAME.github.io/schlock-archive}"
+BASE_URL="${BASE_URL:-https://adamjohnlea.github.io/schlock-archive}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-gh-pages}"
 # --------------------------------------------------------------------------

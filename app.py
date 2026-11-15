@@ -1682,6 +1682,45 @@ def rewrite_links(html_text, existing, slug_url):
     return _INTERNAL_HREF.sub(repl, html_text)
 
 
+_IMG_URL = re.compile(r"https://image\.tmdb\.org/t/p/[A-Za-z0-9/_.\-]+")
+
+
+def _download_image(url):
+    """Fetch an image from TMDB's public CDN (no API key needed). Returns bytes, or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with _urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def localize_images(html_text, out_dir, cache, base_url=None, fetch=None):
+    """Download every TMDB image referenced in html_text into out_dir/img/ and rewrite the HTML.
+
+    cache maps a remote URL to its local path (or None if the download failed) so an image shared
+    across pages is fetched once. A failed download is left pointing at the CDN so the page still
+    works online."""
+    fetch = fetch or _download_image
+    for url in set(_IMG_URL.findall(html_text)):
+        if url not in cache:
+            rel = os.path.join("img", "t", "p", url.split("/t/p/", 1)[1])
+            dest = os.path.join(out_dir, rel)
+            ok = os.path.exists(dest)
+            if not ok:
+                data = fetch(url)
+                if data:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "wb") as fh:
+                        fh.write(data)
+                    ok = True
+            cache[url] = ("/" + rel.replace(os.sep, "/")) if ok else None
+        local = cache[url]
+        if local:
+            html_text = html_text.replace(url, (base_url.rstrip("/") + local) if base_url else local)
+    return html_text
+
+
 def _write_sitemap(out_dir, base_url, locs):
     base = base_url.rstrip("/")
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -1694,16 +1733,19 @@ def _write_sitemap(out_dir, base_url, locs):
         fh.write("User-agent: *\nAllow: /\nSitemap: %s/sitemap.xml\n" % base)
 
 
-def export_site(out_dir, limit=None, base_url=None):
+def export_site(out_dir, limit=None, base_url=None, images=False):
     """Write a static HTML copy of the current archive to out_dir. Returns stats.
 
     base_url (e.g. 'https://schlock.example') enables canonical links, og:url, sitemap.xml and
-    robots.txt; without it the build is still complete but has no absolute-URL metadata."""
+    robots.txt; without it the build is still complete but has no absolute-URL metadata.
+    images=True downloads every referenced TMDB image into out_dir/img and rewrites the pages to
+    serve them locally (slower; needs network)."""
     out_dir = os.path.abspath(out_dir)
     quiet = CONFIG.get("quiet")
     prev = CONFIG.get("static", False)
     CONFIG["static"] = True
     conn = db()
+    img_cache = {}
     try:
         urls = export_targets(conn)
         if limit is not None:
@@ -1718,6 +1760,8 @@ def export_site(out_dir, limit=None, base_url=None):
         for url in urls:
             try:
                 body = rewrite_links(render_route(conn, url), existing, slug_url)
+                if images:
+                    body = localize_images(body, out_dir, img_cache, base_url)
             except Exception as err:  # one bad record must not abort the whole build
                 errors += 1
                 if not quiet:
@@ -1743,11 +1787,13 @@ def export_site(out_dir, limit=None, base_url=None):
     finally:
         conn.close()
         CONFIG["static"] = prev
+    n_images = len([v for v in img_cache.values() if v])
     if not quiet:
         extra = (" (%d skipped)" % errors) if errors else ""
         extra += "  + sitemap.xml, robots.txt" if base_url else ""
+        extra += "  + %d images" % n_images if images else ""
         print("  Exported %d pages to %s%s" % (pages, out_dir, extra))
-    return {"pages": pages, "errors": errors, "out_dir": out_dir, "base_url": base_url}
+    return {"pages": pages, "errors": errors, "out_dir": out_dir, "base_url": base_url, "images": n_images}
 
 
 class Server(ThreadingHTTPServer):
@@ -1779,13 +1825,16 @@ def main(argv=None):
     ap.add_argument("--base-url", default=None,
                     help="with --export, the public site URL (e.g. https://schlock.example); enables "
                          "canonical links, sitemap.xml and robots.txt")
+    ap.add_argument("--images", action="store_true",
+                    help="with --export, download TMDB images into the build and serve them locally "
+                         "(slower, needs network)")
     a = ap.parse_args(argv)
     CONFIG["fake"] = a.fake
     CONFIG["db"] = os.path.abspath(a.db) if a.db else (os.path.join(APP_DIR, "schlock-fake.db") if a.fake else DEFAULT_DB)
     init_db()
     if a.export:
         print("\n  Exporting static site from %s" % CONFIG["db"], flush=True)
-        stats = export_site(a.export, limit=a.limit, base_url=a.base_url)
+        stats = export_site(a.export, limit=a.limit, base_url=a.base_url, images=a.images)
         print("  Done: %d pages written.\n" % stats["pages"])
         return
     srv, port = make_server(a.port)

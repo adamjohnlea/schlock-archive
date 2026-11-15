@@ -473,5 +473,50 @@ class T04StaticExport(unittest.TestCase):
         self.assertClosed("movie/515721-fake-movie-515721/index.html", movie)
 
 
+class T05ImageLocalize(unittest.TestCase):
+    """Downloading TMDB images into the build and rewriting the HTML to point at them."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.calls = []
+
+    def fetch(self, url):
+        self.calls.append(url)
+        return b"\x89PNG-fake-bytes"
+
+    def test_localize_downloads_dedupes_and_rewrites(self):
+        html = ("<img src='https://image.tmdb.org/t/p/w342/abc.jpg'>"
+                "<div style=\"background-image:url('https://image.tmdb.org/t/p/w1280/back.jpg')\"></div>"
+                "<a href='https://www.themoviedb.org/movie/1'>ext</a>")
+        cache = {}
+        out = app.localize_images(html, self.tmp, cache, base_url=None, fetch=self.fetch)
+
+        # files mirror the CDN path under img/
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "img", "t", "p", "w342", "abc.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "img", "t", "p", "w1280", "back.jpg")))
+        # img src and css background rewritten to local; external TMDB *site* link untouched
+        self.assertIn("src='/img/t/p/w342/abc.jpg'", out)
+        self.assertIn("url('/img/t/p/w1280/back.jpg')", out)
+        self.assertIn("themoviedb.org/movie/1", out)
+        self.assertNotIn("image.tmdb.org", out)
+
+        # a repeat of the same image is served from cache (no second download)
+        n = len(self.calls)
+        app.localize_images("<img src='https://image.tmdb.org/t/p/w342/abc.jpg'>", self.tmp, cache, fetch=self.fetch)
+        self.assertEqual(len(self.calls), n)
+
+        # base_url makes the rewritten source absolute
+        out2 = app.localize_images("<img src='https://image.tmdb.org/t/p/w342/abc.jpg'>", self.tmp, cache,
+                                   base_url="https://schlock.test", fetch=self.fetch)
+        self.assertIn("src='https://schlock.test/img/t/p/w342/abc.jpg'", out2)
+
+    def test_failed_download_leaves_url_remote(self):
+        cache = {}
+        out = app.localize_images("<img src='https://image.tmdb.org/t/p/w92/x.jpg'>", self.tmp, cache,
+                                  fetch=lambda url: None)
+        self.assertIn("https://image.tmdb.org/t/p/w92/x.jpg", out)  # unchanged, still loads from the CDN
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "img", "t", "p", "w92", "x.jpg")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

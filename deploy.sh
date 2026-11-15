@@ -29,12 +29,13 @@ if [ -z "$REMOTE_URL" ]; then
   exit 1
 fi
 
-IMAGES=()
-[ "${1:-}" = "--images" ] && IMAGES=(--images)
-
 echo "==> Building static site  (base: $BASE_URL)"
 rm -rf build
-python3 app.py --export build --base-url "$BASE_URL" "${IMAGES[@]}"
+if [ "${1:-}" = "--images" ]; then
+  python3 app.py --export build --base-url "$BASE_URL" --images
+else
+  python3 app.py --export build --base-url "$BASE_URL"
+fi
 test -f build/index.html || { echo "Build produced no index.html; aborting." >&2; exit 1; }
 
 echo "==> Publishing build/ to $REMOTE/$BRANCH"

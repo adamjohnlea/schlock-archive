@@ -53,7 +53,7 @@ CATEGORY_LABELS = {
                                                   "You probably know these already, but their early filmographies belong in the search."),
 }
 
-CONFIG = {"db": DEFAULT_DB, "fake": False}
+CONFIG = {"db": DEFAULT_DB, "fake": False, "static": False}
 
 
 def now_iso():
@@ -582,6 +582,8 @@ def fetch_title(conn, media_type, tid):
 
 def _ensure(conn, select, args, fetch, force):
     row = conn.execute(select, args).fetchone()
+    if CONFIG.get("static"):
+        return row, None  # static export never contacts TMDB; render whatever is in the DB
     warning = None
     if force or row is None or row["fetched_at"] is None or age_days(row["fetched_at"]) > stale_days(conn):
         try:
@@ -808,18 +810,27 @@ FAVICON = ("data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewB
 def page(title, body, warning=None, status=200, flash_kind="warn", head_extra=""):
     flash = ('<div class="flash %s">%s</div>' % (flash_kind, e(warning))) if warning else ""
     fake = ' <span class="badge tv">FAKE DATA MODE</span>' if CONFIG["fake"] else ""
+    if CONFIG.get("static"):
+        nav = "<nav><a href='/'>Directors</a></nav>"
+        search = ""
+        footer_note = ("A static archive of schlock directors and their films, built from "
+                       "<a href='https://www.themoviedb.org/' target='_blank' rel='noopener'>TMDB</a> data. "
+                       "This product uses the TMDB API but is not endorsed or certified by TMDB.")
+    else:
+        nav = ("<nav><a href='/'>Directors</a><a href='/library'>Library</a><a href='/watchlist'>Watchlist</a>"
+               "<a href='/settings'>Settings</a></nav>")
+        search = ("<form class='search' action='/search' method='get'><input type='search' name='q' "
+                  "placeholder='Search people &amp; films…'><button>Go</button></form>")
+        footer_note = ("Data and images from <a href='https://www.themoviedb.org/' target='_blank' "
+                       "rel='noopener'>TMDB</a>. This product uses the TMDB API but is not endorsed or certified by "
+                       "TMDB. Everything you browse is saved in a local SQLite file.")
     doc = ("<!doctype html><html lang='en'><head><meta charset='utf-8'>%s"
            "<meta name='viewport' content='width=device-width,initial-scale=1'><title>%s · Schlock Archive</title>"
            "<link rel='icon' href='%s'><style>%s</style></head><body>"
            "<header class='top'><div class='bar'><a class='brand' href='/'>Schlock<span>Archive</span></a>%s"
-           "<nav><a href='/'>Directors</a><a href='/library'>Library</a><a href='/watchlist'>Watchlist</a>"
-           "<a href='/settings'>Settings</a></nav>"
-           "<form class='search' action='/search' method='get'><input type='search' name='q' "
-           "placeholder='Search people &amp; films…'><button>Go</button></form></div></header>"
-           "<main>%s%s</main><footer>Data and images from <a href='https://www.themoviedb.org/' target='_blank' "
-           "rel='noopener'>TMDB</a>. This product uses the TMDB API but is not endorsed or certified by TMDB. "
-           "Everything you browse is saved in a local SQLite file.</footer></body></html>"
-           % (head_extra, e(title), FAVICON, CSS, fake, flash, body))
+           "%s%s</div></header>"
+           "<main>%s%s</main><footer>%s</footer></body></html>"
+           % (head_extra, e(title), FAVICON, CSS, fake, nav, search, flash, body, footer_note))
     return status, doc
 
 
@@ -900,7 +911,7 @@ def render_home(conn, flash=None):
          "archive. Every name and film on every page links onward, so the archive grows as you browse.</p>" % len(rows),
          "<div class='stats'><div><b>%d</b>people imported</div><div><b>%d</b>films imported</div>"
          "<div><b>%d</b>want to watch</div><div><b>%d</b>watched</div></div>" % (st["p"], st["m"], st["w"], st["d"])]
-    if not has_key(conn):
+    if not has_key(conn) and not CONFIG.get("static"):
         o.append("<div class='flash warn'>No TMDB key yet. <a href='/setup'>Set one up</a> to start importing.</div>")
     keys = sorted(cats.keys())
     o.append("<p class='toc'>" + " ".join("<a href='#%s'>%s</a>" % (e(k), e(CATEGORY_LABELS.get(k, (k,))[0]))
@@ -932,6 +943,8 @@ def render_person(conn, pid, view=None, force=False):
     has_dir = any(c["job"] == "Director" for c in creds)
     if view not in ("directing", "all", "acting", "crew"):
         view = "directing" if has_dir else "all"
+    if CONFIG.get("static"):
+        view = "all"  # one static page shows the whole filmography (no ?view= querystrings)
     filters = {"directing": lambda c: c["job"] == "Director", "acting": lambda c: c["credit_type"] == "cast",
                "crew": lambda c: c["credit_type"] == "crew", "all": lambda c: True}
     grouped = {}
@@ -974,42 +987,46 @@ def render_person(conn, pid, view=None, force=False):
     if row["biography"]:
         o.append("<div class='bio'>%s</div>" % e(row["biography"]))
 
-    o.append("<div class='actions'><form method='post' action='/person/%d/refresh'>"
-             "<button class='alt'>↻ Refresh from TMDB</button></form>" % pid)
-    job = latest_job(conn, pid)
-    running = job is not None and job["status"] == "running"
-    if not running:
-        pending_dir = len(filmography_targets(conn, pid, "directing"))
-        pending_all = len(filmography_targets(conn, pid, "all"))
-        if pending_dir:
-            o.append("<form method='post' action='/person/%d/import'><input type='hidden' name='scope' value='directing'>"
-                     "<button>Import directed films (%d)</button></form>" % (pid, pending_dir))
-        if pending_all > pending_dir:
-            o.append("<form method='post' action='/person/%d/import'><input type='hidden' name='scope' value='all'>"
-                     "<button class='alt'>Import every film credit (%d)</button></form>" % (pid, pending_all))
-    o.append("<span class='small muted'>Saved %s</span></div>" % e(local_time(row["fetched_at"])))
     head_extra = ""
-    if job:
-        if running:
-            pct = int(100 * (job["done"] + job["failed"]) / job["total"]) if job["total"] else 100
-            head_extra = "<meta http-equiv='refresh' content='3'>"
-            o.append("<div class='panel'><b>Importing filmography…</b> %d of %d done%s"
-                     "<div class='progress'><div style='width:%d%%'></div></div><span class='small muted'>This page "
-                     "refreshes itself. You can keep browsing in another tab.</span></div>"
-                     % (job["done"] + job["failed"], job["total"],
-                        (" (%d failed)" % job["failed"]) if job["failed"] else "", pct))
-        elif age_days(job["finished_at"]) < 0.02:  # finished in the last ~30 minutes
-            o.append("<div class='flash %s'>Filmography import %s: %d of %d imported%s.</div>"
-                     % ("ok" if not job["failed"] else "warn", e(job["status"]), job["done"], job["total"],
-                        (", %d failed (%s)" % (job["failed"], e(job["last_error"]))) if job["failed"] else ""))
+    if not CONFIG.get("static"):
+        o.append("<div class='actions'><form method='post' action='/person/%d/refresh'>"
+                 "<button class='alt'>↻ Refresh from TMDB</button></form>" % pid)
+        job = latest_job(conn, pid)
+        running = job is not None and job["status"] == "running"
+        if not running:
+            pending_dir = len(filmography_targets(conn, pid, "directing"))
+            pending_all = len(filmography_targets(conn, pid, "all"))
+            if pending_dir:
+                o.append("<form method='post' action='/person/%d/import'><input type='hidden' name='scope' value='directing'>"
+                         "<button>Import directed films (%d)</button></form>" % (pid, pending_dir))
+            if pending_all > pending_dir:
+                o.append("<form method='post' action='/person/%d/import'><input type='hidden' name='scope' value='all'>"
+                         "<button class='alt'>Import every film credit (%d)</button></form>" % (pid, pending_all))
+        o.append("<span class='small muted'>Saved %s</span></div>" % e(local_time(row["fetched_at"])))
+        if job:
+            if running:
+                pct = int(100 * (job["done"] + job["failed"]) / job["total"]) if job["total"] else 100
+                head_extra = "<meta http-equiv='refresh' content='3'>"
+                o.append("<div class='panel'><b>Importing filmography…</b> %d of %d done%s"
+                         "<div class='progress'><div style='width:%d%%'></div></div><span class='small muted'>This page "
+                         "refreshes itself. You can keep browsing in another tab.</span></div>"
+                         % (job["done"] + job["failed"], job["total"],
+                            (" (%d failed)" % job["failed"]) if job["failed"] else "", pct))
+            elif age_days(job["finished_at"]) < 0.02:  # finished in the last ~30 minutes
+                o.append("<div class='flash %s'>Filmography import %s: %d of %d imported%s.</div>"
+                         % ("ok" if not job["failed"] else "warn", e(job["status"]), job["done"], job["total"],
+                            (", %d failed (%s)" % (job["failed"], e(job["last_error"]))) if job["failed"] else ""))
     o.append("</div></div>")
 
     def count(fn):
         return len({(c["media_type"], c["title_id"]) for c in creds if fn(c)})
     o.append("<h2>Filmography</h2><div class='tabs'>")
     for v, lab in (("directing", "Directed"), ("all", "All credits"), ("acting", "Acting"), ("crew", "Crew")):
-        o.append("<a class='%s' href='/person/%d?view=%s'>%s (%d)</a>"
-                 % ("on" if v == view else "", pid, v, lab, count(filters[v])))
+        if CONFIG.get("static"):
+            o.append("<span class='%s'>%s (%d)</span>" % ("on" if v == view else "", lab, count(filters[v])))
+        else:
+            o.append("<a class='%s' href='/person/%d?view=%s'>%s (%d)</a>"
+                     % ("on" if v == view else "", pid, v, lab, count(filters[v])))
     o.append("</div>")
     if not items:
         o.append("<p class='muted'>No credits in this view.</p>")
@@ -1113,21 +1130,32 @@ def render_title(conn, media_type, tid, force=False, flash=None):
 
     # personal panel
     status = ud["status"] if ud else None
-    o.append("<div class='panel'><b>Your notes</b><div class='actions'>")
-    for val, lab in (("want", "★ Want to watch"), ("watched", "✓ Watched"), ("", "Clear")):
-        cls = "on" if val and status == val else "alt"
-        o.append("<form method='post' action='%s/user'><input type='hidden' name='action' value='status'>"
-                 "<input type='hidden' name='status' value='%s'><button class='%s'>%s</button></form>"
-                 % (base, val, cls, lab))
-    opts = "".join("<option value='%d'%s>%d</option>" % (n, " selected" if ud and ud["rating"] == n else "", n)
-                   for n in range(10, 0, -1))
-    o.append("</div><form method='post' action='%s/user'><input type='hidden' name='action' value='notes'>"
-             "<label class='small muted'>My rating <select name='rating'><option value=''>none</option>%s</select></label>"
-             "<textarea name='notes' rows='3' style='width:100%%;margin:8px 0;display:block' placeholder='Notes: where you "
-             "found it, who to watch it with, how bad it really is…'>%s</textarea><button>Save notes</button></form></div>"
-             % (base, opts, e(ud["notes"] if ud else "")))
-    o.append("<div class='actions'><form method='post' action='%s/refresh'><button class='alt'>↻ Refresh from TMDB"
-             "</button></form><span class='small muted'>Saved %s</span></div>" % (base, e(local_time(row["fetched_at"]))))
+    if CONFIG.get("static"):
+        if ud and (status or ud["rating"] or ud["notes"]):
+            bits = []
+            if status:
+                bits.append(status_badge(status).strip())
+            if ud["rating"]:
+                bits.append("Rated <b>%d/10</b>" % ud["rating"])
+            head = (" · ".join(bits)) if bits else ""
+            note = ("<p>%s</p>" % e(ud["notes"])) if ud["notes"] else ""
+            o.append("<div class='panel'><b>Curator's note</b> %s%s</div>" % (head, note))
+    else:
+        o.append("<div class='panel'><b>Your notes</b><div class='actions'>")
+        for val, lab in (("want", "★ Want to watch"), ("watched", "✓ Watched"), ("", "Clear")):
+            cls = "on" if val and status == val else "alt"
+            o.append("<form method='post' action='%s/user'><input type='hidden' name='action' value='status'>"
+                     "<input type='hidden' name='status' value='%s'><button class='%s'>%s</button></form>"
+                     % (base, val, cls, lab))
+        opts = "".join("<option value='%d'%s>%d</option>" % (n, " selected" if ud and ud["rating"] == n else "", n)
+                       for n in range(10, 0, -1))
+        o.append("</div><form method='post' action='%s/user'><input type='hidden' name='action' value='notes'>"
+                 "<label class='small muted'>My rating <select name='rating'><option value=''>none</option>%s</select></label>"
+                 "<textarea name='notes' rows='3' style='width:100%%;margin:8px 0;display:block' placeholder='Notes: where you "
+                 "found it, who to watch it with, how bad it really is…'>%s</textarea><button>Save notes</button></form></div>"
+                 % (base, opts, e(ud["notes"] if ud else "")))
+        o.append("<div class='actions'><form method='post' action='%s/refresh'><button class='alt'>↻ Refresh from TMDB"
+                 "</button></form><span class='small muted'>Saved %s</span></div>" % (base, e(local_time(row["fetched_at"]))))
     o.append("</div></div>")
 
     if kws:
@@ -1267,7 +1295,7 @@ def render_tag(conn, kind, tag_id, discover=False):
     o = ["<h1>%s: %s</h1>" % (kind.title(), e(label)),
          "<p class='muted'>%d titles in your archive. %s</p>" % (len(rows), tmdb_ext(kind, tag_id)),
          "<div class='tiles'>%s</div>" % "".join(title_tile(r) for r in rows)]
-    if kind == "keyword":
+    if kind == "keyword" and not CONFIG.get("static"):
         if not discover:
             o.append("<div class='actions'><a class='btn' href='/keyword/%d?discover=1'>Find more films with this "
                      "keyword on TMDB</a></div>" % tag_id)
@@ -1540,6 +1568,106 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
 
+# ----------------------------------------------------------------------------
+# Static site export
+# ----------------------------------------------------------------------------
+
+# Internal links the exporter knows how to turn into files. Matches an optional
+# ?query so stale tab/discover links collapse to their base page.
+_INTERNAL_HREF = re.compile(r"href=(?P<q>['\"])(?P<path>/(?:person|movie|tv|genre|keyword)/\d+)(?:\?[^'\"]*)?(?P=q)")
+
+
+def _url_to_path(url):
+    """Map a route to the file that serves it: '/' -> index.html, '/person/5' -> person/5/index.html."""
+    if url == "/":
+        return "index.html"
+    return os.path.join(url.strip("/"), "index.html")
+
+
+def export_targets(conn):
+    """Every page worth writing: home, plus each fetched person, title, and referenced genre/keyword."""
+    urls = ["/"]
+    urls += ["/person/%d" % r["id"] for r in conn.execute(
+        "SELECT id FROM people WHERE fetched_at IS NOT NULL ORDER BY id")]
+    urls += ["/%s/%d" % (r["media_type"], r["id"]) for r in conn.execute(
+        "SELECT media_type, id FROM movies WHERE fetched_at IS NOT NULL ORDER BY media_type, id")]
+    urls += ["/genre/%d" % r["id"] for r in conn.execute(
+        "SELECT DISTINCT g.genre_id id FROM movie_genres g JOIN movies m "
+        "ON m.media_type=g.media_type AND m.id=g.movie_id WHERE m.fetched_at IS NOT NULL ORDER BY g.genre_id")]
+    urls += ["/keyword/%d" % r["id"] for r in conn.execute(
+        "SELECT DISTINCT k.keyword_id id FROM movie_keywords k JOIN movies m "
+        "ON m.media_type=k.media_type AND m.id=k.movie_id WHERE m.fetched_at IS NOT NULL ORDER BY k.keyword_id")]
+    return urls
+
+
+def render_route(conn, url):
+    """Render a single route to its HTML body using the live page renderers (static mode)."""
+    if url == "/":
+        return render_home(conn)[1]
+    m = re.match(r"^/person/(\d+)$", url)
+    if m:
+        return render_person(conn, int(m.group(1)))[1]
+    m = re.match(r"^/(movie|tv)/(\d+)$", url)
+    if m:
+        return render_title(conn, m.group(1), int(m.group(2)))[1]
+    m = re.match(r"^/(genre|keyword)/(\d+)$", url)
+    if m:
+        return render_tag(conn, m.group(1), int(m.group(2)))[1]
+    raise ValueError("no static route for %s" % url)
+
+
+def neutralize_dead_links(html_text, existing):
+    """Keep internal links whose target was exported (stripping any ?query); de-link the rest.
+
+    A de-linked anchor keeps its text but loses its href, so the published site has no broken
+    internal links (e.g. cast members whose pages were never imported)."""
+    def repl(m):
+        q, path = m.group("q"), m.group("path")
+        if path in existing:
+            return "href=%s%s%s" % (q, path, q)
+        return "data-unlinked=%s%s%s" % (q, path, q)
+    return _INTERNAL_HREF.sub(repl, html_text)
+
+
+def export_site(out_dir, limit=None):
+    """Write a static HTML copy of the current archive to out_dir. Returns stats."""
+    out_dir = os.path.abspath(out_dir)
+    quiet = CONFIG.get("quiet")
+    prev = CONFIG.get("static", False)
+    CONFIG["static"] = True
+    conn = db()
+    try:
+        urls = export_targets(conn)
+        if limit is not None:
+            people = [u for u in urls if u.startswith("/person/")][:limit]
+            rest = [u for u in urls if not u.startswith("/person/") and u != "/"]
+            urls = ["/"] + people + rest
+        existing = set(urls)
+        pages = errors = 0
+        for url in urls:
+            try:
+                body = neutralize_dead_links(render_route(conn, url), existing)
+            except Exception as err:  # one bad record must not abort the whole build
+                errors += 1
+                if not quiet:
+                    print("  skip %s (%s: %s)" % (url, type(err).__name__, err))
+                continue
+            dest = os.path.join(out_dir, _url_to_path(url))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            pages += 1
+            if not quiet and pages % 250 == 0:
+                print("  ...%d pages" % pages, flush=True)
+    finally:
+        conn.close()
+        CONFIG["static"] = prev
+    if not quiet:
+        print("  Exported %d pages to %s%s"
+              % (pages, out_dir, (" (%d skipped)" % errors) if errors else ""))
+    return {"pages": pages, "errors": errors, "out_dir": out_dir}
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -1562,10 +1690,19 @@ def main(argv=None):
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser window")
     ap.add_argument("--fake", action="store_true",
                     help="demo/test mode with synthetic TMDB data (uses schlock-fake.db, never contacts TMDB)")
+    ap.add_argument("--export", metavar="DIR",
+                    help="write a static HTML copy of the current archive to DIR and exit (no server, no TMDB)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="with --export, cap how many person pages to write (for quick test builds)")
     a = ap.parse_args(argv)
     CONFIG["fake"] = a.fake
     CONFIG["db"] = os.path.abspath(a.db) if a.db else (os.path.join(APP_DIR, "schlock-fake.db") if a.fake else DEFAULT_DB)
     init_db()
+    if a.export:
+        print("\n  Exporting static site from %s" % CONFIG["db"], flush=True)
+        stats = export_site(a.export, limit=a.limit)
+        print("  Done: %d pages written.\n" % stats["pages"])
+        return
     srv, port = make_server(a.port)
     url = "http://localhost:%d/" % port
     print("\n  Schlock Archive is running at %s" % url, flush=True)

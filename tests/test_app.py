@@ -394,5 +394,71 @@ class T03RealClient(unittest.TestCase):
         self.assertNotIn(V3_KEY, cm.exception.message)
 
 
+class T04StaticExport(unittest.TestCase):
+    """Export the archive to static HTML and verify the published site is clean."""
+
+    def setUp(self):
+        self.saved = dict(app.CONFIG)
+        self.tmp = tempfile.mkdtemp()
+        app.CONFIG["db"] = os.path.join(self.tmp, "exp.db")
+        app.CONFIG["fake"] = True
+        app.CONFIG["quiet"] = True
+        app.CONFIG["static"] = False
+        app.init_db()
+        c = app.db()
+        app.set_setting(c, "tmdb_credential", V3_KEY)
+        app.ensure_person(c, 51572)          # pulls credits + stub titles
+        app.ensure_title(c, "movie", 515721)  # fetch one of the stub films
+        app.ensure_title(c, "tv", 515729)     # and one tv credit
+        c.close()
+        self.build = os.path.join(self.tmp, "site")
+
+    def tearDown(self):
+        app.CONFIG.clear()
+        app.CONFIG.update(self.saved)
+
+    def read(self, *parts):
+        with open(os.path.join(self.build, *parts), encoding="utf-8") as f:
+            return f.read()
+
+    def assertClosed(self, rel, body):
+        for path in re.findall(r"href='(/(?:person|movie|tv|genre|keyword)/\d+)'", body):
+            f = os.path.join(self.build, path.lstrip("/"), "index.html")
+            self.assertTrue(os.path.exists(f), "dead internal link %s in %s" % (path, rel))
+
+    def test_export_produces_a_clean_static_site(self):
+        stats = app.export_site(self.build)
+        self.assertGreater(stats["pages"], 3)
+
+        self.assertTrue(os.path.exists(os.path.join(self.build, "index.html")))
+        self.assertTrue(os.path.exists(os.path.join(self.build, "person", "51572", "index.html")))
+        self.assertTrue(os.path.exists(os.path.join(self.build, "movie", "515721", "index.html")))
+
+        home = self.read("index.html")
+        person = self.read("person", "51572", "index.html")
+        movie = self.read("movie", "515721", "index.html")
+
+        self.assertIn("Aaron Norris", home)
+        self.assertIn("href='/person/51572'", home)
+
+        # no interactive chrome survives the export
+        for name, doc in (("home", home), ("person", person), ("movie", movie)):
+            self.assertNotIn("<form", doc, "form leaked into %s" % name)
+            self.assertNotIn("method='post'", doc, "post leaked into %s" % name)
+            self.assertNotIn("Refresh from TMDB", doc)
+        self.assertNotIn("Import directed films", person)
+        self.assertNotIn("?view=", person)
+        self.assertNotIn("?discover=", movie)
+
+        # fetched director stays linked; an un-imported stub cast member is de-linked
+        self.assertIn("href='/person/51572'", movie)
+        self.assertNotIn("href='/person/516721'", movie)
+
+        # every internal link that remains points at a page we actually wrote
+        self.assertClosed("index.html", home)
+        self.assertClosed("person/51572/index.html", person)
+        self.assertClosed("movie/515721/index.html", movie)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

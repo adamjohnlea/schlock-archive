@@ -1681,13 +1681,19 @@ def build_slug_url(conn):
 def rewrite_links(html_text, existing, slug_url, base_path=""):
     """Slug internal links whose target was exported (dropping any ?query); de-link the rest.
 
-    Kept links are prefixed with base_path so the site works under a project-page subpath. A
-    de-linked anchor keeps its text but loses its href, so the published site has no broken
-    internal links (e.g. cast members whose pages were never imported)."""
+    Kept links are prefixed with base_path so the site works under a project-page subpath.
+    A target that was not exported (e.g. a cast member or film never imported) does not become
+    a dead, hrefless anchor — on a sparse archive that would leave most names looking clickable
+    but doing nothing. Instead a person/movie/tv target points out to its TMDB page, so every
+    name stays clickable; genre/keyword have no clean TMDB page and fall back to de-linked."""
     def repl(m):
         q, path = m.group("q"), m.group("path")
         if path in existing:
             return "href=%s%s%s%s" % (q, base_path, slug_url(path), q)
+        _, kind, tid = path.split("/", 2)
+        if kind in ("person", "movie", "tv"):
+            return ("href=%shttps://www.themoviedb.org/%s/%s%s target='_blank' rel='noopener'"
+                    % (q, kind, tid, q))
         return "data-unlinked=%s%s%s" % (q, path, q)
     return _INTERNAL_HREF.sub(repl, html_text)
 

@@ -453,7 +453,8 @@ class T04StaticExport(unittest.TestCase):
         self.assertNotIn("?view=", person)
         self.assertNotIn("?discover=", movie)
 
-        # fetched director stays linked (slugged); an un-imported stub cast member is de-linked
+        # fetched director stays linked (slugged); an un-imported cast member is NOT dead:
+        # it has no internal link, but points out to TMDB so the name is still clickable
         self.assertIn("href='/person/51572-aaron-norris'", movie)
         self.assertNotIn("href='/person/516721", movie)
 
@@ -510,6 +511,38 @@ class T04StaticExport(unittest.TestCase):
         for path in re.findall(r"href='/schlock-archive(/(?:person|movie|tv|genre|keyword)/[0-9][A-Za-z0-9-]*)'", home):
             self.assertTrue(os.path.exists(os.path.join(build2, path.lstrip("/"), "index.html")),
                             "dead subpath link %s" % path)
+
+
+    def test_unexported_links_go_to_tmdb_not_dead(self):
+        # On a sparse archive most internal targets are not exported. Those must not become
+        # dead (hrefless) anchors that still look like links — person/movie/tv point out to
+        # TMDB so every name stays clickable; genre/keyword (no clean TMDB page) stay de-linked.
+        existing = {"/person/10"}
+        html = ("<a class='name' href='/person/10'>kept</a>"
+                "<a class='name' href='/person/999'>gone-person</a>"
+                "<a href='/movie/42'>gone-movie</a>"
+                "<a href='/tv/7?view=all'>gone-tv</a>"
+                "<a href='/genre/5'>gone-genre</a>")
+        out = app.rewrite_links(html, existing, lambda p: p)
+        # exported target keeps its internal (slugged) link
+        self.assertIn("href='/person/10'", out)
+        # un-exported person/movie/tv link out to TMDB, opening in a new tab
+        self.assertIn("href='https://www.themoviedb.org/person/999' target='_blank' rel='noopener'", out)
+        self.assertIn("href='https://www.themoviedb.org/movie/42' target='_blank' rel='noopener'", out)
+        self.assertIn("href='https://www.themoviedb.org/tv/7' target='_blank' rel='noopener'", out)
+        # none of those are left dead
+        self.assertNotIn("data-unlinked='/person/999'", out)
+        self.assertNotIn("data-unlinked='/movie/42'", out)
+        # genre/keyword have no clean TMDB page, so they fall back to de-linked
+        self.assertIn("data-unlinked='/genre/5'", out)
+
+    def test_unexported_links_respect_the_subpath_prefix_for_kept_links_only(self):
+        # The base_path prefix applies to kept internal links; TMDB links are absolute.
+        out = app.rewrite_links(
+            "<a href='/person/10'>k</a><a href='/person/999'>g</a>",
+            {"/person/10"}, lambda p: p, base_path="/schlock-archive")
+        self.assertIn("href='/schlock-archive/person/10'", out)
+        self.assertIn("href='https://www.themoviedb.org/person/999'", out)
 
 
 class T05ImageLocalize(unittest.TestCase):
